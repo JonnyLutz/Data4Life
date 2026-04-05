@@ -11,7 +11,13 @@ import { DayPicker } from 'react-day-picker'
 import { format, parseISO } from 'date-fns'
 import 'react-day-picker/style.css'
 
-export default function SleepCalendarView({ sleeps = [], loading, error, onRetry }) {
+export default function SleepCalendarView({
+  sleeps = [],
+  loading,
+  error,
+  onRetry,
+  sleepMeta = 'Last 7 sleeps',
+}) {
   const [selectedDay, setSelectedDay] = useState(new Date())
 
   const sleepsByDayKey = useMemo(() => {
@@ -39,7 +45,7 @@ export default function SleepCalendarView({ sleeps = [], loading, error, onRetry
       <section className="panel">
         <div className="panelHeader">
           <div className="panelTitle">Sleep calendar</div>
-          <div className="panelMeta">Last 7 sleeps</div>
+          <div className="panelMeta">{sleepMeta}</div>
         </div>
         <div className="panelBody">
           <DayPicker

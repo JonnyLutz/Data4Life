@@ -2,34 +2,21 @@ import { useLayoutEffect, useMemo, useState } from 'react'
 import './App.css'
 
 import {
-  COGNITO_ACCESS_TOKEN_KEY,
+  clearTokens,
   COGNITO_ID_TOKEN_KEY,
-  consumeImplicitCognitoRedirect,
-  getCognitoImplicitLoginUrl,
-} from './auth/cognitoImplicit'
-import { fetchDashboard, fetchWhoopLoginUrl } from './api/whoop'
+  consumeCognitoPkceRedirect,
+  getCognitoPkceLoginUrl,
+  getStoredIdToken,
+  readCognitoEnv,
+  refreshCognitoTokens,
+} from './auth/cognitoPkce'
+import { fetchDashboard, fetchInsightsSummary, fetchWhoopLoginUrl } from './api/whoop'
+import { decodeJwtPayload, isTokenValid } from './lib/jwt'
 import Dashboard from './components/Dashboard.jsx'
 import LoginPanel from './components/LoginPanel.jsx'
+import SleepCalendarView from './views/SleepCalendarView.jsx'
 
-function decodeJwtPayload(token) {
-  try {
-    const [, payload] = token.split('.')
-    if (!payload) return null
-    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'))
-    return JSON.parse(json)
-  } catch {
-    return null
-  }
-}
-
-function isTokenValid(token) {
-  const trimmed = token.trim()
-  if (!trimmed) return false
-  const p = decodeJwtPayload(trimmed)
-  if (!p) return false
-  if (typeof p.exp !== 'number') return true
-  return Date.now() < p.exp * 1000 - 30_000
-}
+const SLEEP_LIMIT = 25
 
 function App() {
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -37,20 +24,22 @@ function App() {
     import.meta.env.DEV && apiBaseUrl
       ? `Dev proxy: /aws-api → ${apiBaseUrl.replace(/\/$/, '')}`
       : apiBaseUrl
+  const cognitoReady = Boolean(readCognitoEnv())
+
   const [sessionChecked, setSessionChecked] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [dashboardPayload, setDashboardPayload] = useState(null)
+  const [activeView, setActiveView] = useState('dashboard')
   const [showDevAuth, setShowDevAuth] = useState(false)
   const [tokenSaved, setTokenSaved] = useState(false)
   const [cognitoLinkCopied, setCognitoLinkCopied] = useState(false)
   const [authCallbackError, setAuthCallbackError] = useState('')
-  const [idTokenDraft, setIdTokenDraft] = useState(
-    () =>
-      window.localStorage.getItem(COGNITO_ID_TOKEN_KEY) ??
-      window.localStorage.getItem(COGNITO_ACCESS_TOKEN_KEY) ??
-      '',
-  )
+  const [idTokenDraft, setIdTokenDraft] = useState(() => getStoredIdToken())
+  const [insightsText, setInsightsText] = useState('')
+  const [insightsLoading, setInsightsLoading] = useState(false)
+  const [insightsError, setInsightsError] = useState('')
+  const [insightsSource, setInsightsSource] = useState('')
 
   const tokenPayload = useMemo(() => decodeJwtPayload(idTokenDraft.trim()), [idTokenDraft])
   const tokenUse = tokenPayload?.token_use ?? tokenPayload?.tokenUse ?? ''
@@ -76,11 +65,16 @@ function App() {
     idTokenDraft.trim().length > 0 &&
     (!tokenPayload || tokenExpired)
 
-  const cognitoLoginUrl = getCognitoImplicitLoginUrl()
+  const sleepRecords = useMemo(() => {
+    const s = dashboardPayload?.sections?.sleep
+    if (!s?.ok || !s.data?.records) return []
+    return s.data.records
+  }, [dashboardPayload])
 
   async function copyCognitoLoginUrl() {
     try {
-      await navigator.clipboard.writeText(cognitoLoginUrl)
+      const url = await getCognitoPkceLoginUrl()
+      await navigator.clipboard.writeText(url)
       setCognitoLinkCopied(true)
       window.setTimeout(() => setCognitoLinkCopied(false), 2000)
     } catch {
@@ -96,6 +90,7 @@ function App() {
     setError('')
     setLoading(true)
     try {
+      await refreshCognitoTokens()
       const data = await fetchDashboard()
       setDashboardPayload(data)
     } catch (e) {
@@ -118,52 +113,90 @@ function App() {
   }
 
   function signIn() {
-    window.location.assign(getCognitoImplicitLoginUrl())
+    void (async () => {
+      try {
+        window.location.assign(await getCognitoPkceLoginUrl())
+      } catch (e) {
+        setAuthCallbackError(e instanceof Error ? e.message : 'Sign-in failed to start')
+      }
+    })()
   }
 
   function logout() {
-    window.localStorage.removeItem(COGNITO_ID_TOKEN_KEY)
-    window.localStorage.removeItem(COGNITO_ACCESS_TOKEN_KEY)
+    clearTokens()
     setIdTokenDraft('')
     setDashboardPayload(null)
     setError('')
     setAuthCallbackError('')
+    setInsightsText('')
+    setInsightsError('')
     setLoading(false)
   }
 
+  async function loadInsights() {
+    setInsightsError('')
+    setInsightsLoading(true)
+    try {
+      await refreshCognitoTokens()
+      const r = await fetchInsightsSummary()
+      setInsightsText(r.summary)
+      setInsightsSource(r.source ?? '')
+    } catch (e) {
+      setInsightsText('')
+      setInsightsError(e instanceof Error ? e.message : 'Failed to load insights')
+    } finally {
+      setInsightsLoading(false)
+    }
+  }
+
   useLayoutEffect(() => {
-    const rr = consumeImplicitCognitoRedirect()
-    if (rr && !rr.ok) {
-      setAuthCallbackError(rr.errorDescription || rr.error)
-    } else if (rr?.ok) {
-      setAuthCallbackError('')
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('whoop') === 'connected') {
+      params.delete('whoop')
+      const q = params.toString()
+      window.history.replaceState(null, '', `${window.location.pathname}${q ? `?${q}` : ''}`)
     }
 
-    const stored =
-      window.localStorage.getItem(COGNITO_ID_TOKEN_KEY) ??
-      window.localStorage.getItem(COGNITO_ACCESS_TOKEN_KEY) ??
-      ''
-    setIdTokenDraft(stored)
+    let alive = true
+    void (async () => {
+      try {
+        const rr = await consumeCognitoPkceRedirect()
+        if (!alive) return
+        if (rr && !rr.ok) {
+          setAuthCallbackError(rr.errorDescription || rr.error)
+        } else if (rr?.ok) {
+          setAuthCallbackError('')
+        }
 
-    if (stored.trim() && isTokenValid(stored)) {
-      void (async () => {
-        setError('')
-        setLoading(true)
-        try {
-          const data = await fetchDashboard()
-          setDashboardPayload(data)
-        } catch (e) {
-          setDashboardPayload(null)
-          setError(e instanceof Error ? e.message : 'Failed to load dashboard')
-        } finally {
+        const stored = getStoredIdToken()
+        setIdTokenDraft(stored)
+
+        if (stored.trim() && isTokenValid(stored)) {
+          await refreshCognitoTokens()
+          setError('')
+          setLoading(true)
+          try {
+            const data = await fetchDashboard()
+            if (!alive) return
+            setDashboardPayload(data)
+          } catch (e) {
+            if (!alive) return
+            setDashboardPayload(null)
+            setError(e instanceof Error ? e.message : 'Failed to load dashboard')
+          } finally {
+            if (alive) setLoading(false)
+          }
+        } else {
           setLoading(false)
         }
-      })()
-    } else {
-      setLoading(false)
-    }
+      } finally {
+        if (alive) setSessionChecked(true)
+      }
+    })()
 
-    setSessionChecked(true)
+    return () => {
+      alive = false
+    }
   }, [])
 
   if (!sessionChecked) {
@@ -183,6 +216,7 @@ function App() {
           onSignIn={signIn}
           callbackError={authCallbackError}
           sessionExpired={sessionExpired}
+          missingCognitoEnv={!cognitoReady}
         />
       </div>
     )
@@ -216,6 +250,30 @@ function App() {
         </div>
       </header>
 
+      <nav className="navTabs" aria-label="Views">
+        <button
+          type="button"
+          className={activeView === 'dashboard' ? 'navTab navTab--active' : 'navTab'}
+          onClick={() => setActiveView('dashboard')}
+        >
+          Dashboard
+        </button>
+        <button
+          type="button"
+          className={activeView === 'calendar' ? 'navTab navTab--active' : 'navTab'}
+          onClick={() => setActiveView('calendar')}
+        >
+          Sleep calendar
+        </button>
+        <button
+          type="button"
+          className={activeView === 'insights' ? 'navTab navTab--active' : 'navTab'}
+          onClick={() => setActiveView('insights')}
+        >
+          Insights
+        </button>
+      </nav>
+
       {import.meta.env.DEV && showDevAuth ? (
         <div className="devAuthBar">
           <div className="panelMeta" style={{ marginBottom: 6 }}>
@@ -226,21 +284,12 @@ function App() {
             API: <span className="mono">{apiDisplay || '—'}</span>
           </div>
           <div className="devAuthCognito">
-            <div className="devAuthCognitoLabel">Hosted UI URL (same as Sign in)</div>
+            <div className="devAuthCognitoLabel">Hosted UI (PKCE — same as Sign in)</div>
             <div className="devAuthCognitoRow">
-              <a
-                className="devAuthCognitoOpen"
-                href={cognitoLoginUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Open Cognito login
-              </a>
               <button type="button" className="ghostBtn" onClick={() => void copyCognitoLoginUrl()}>
-                {cognitoLinkCopied ? 'Copied URL' : 'Copy URL'}
+                {cognitoLinkCopied ? 'Copied URL' : 'Copy login URL'}
               </button>
             </div>
-            <div className="devAuthCognitoHint mono">{cognitoLoginUrl}</div>
           </div>
           <div className="panelMeta" style={{ marginBottom: 8 }}>
             Token:{' '}
@@ -285,23 +334,60 @@ function App() {
       ) : null}
 
       <main className="mainSingle">
-        {loading && !dashboardPayload ? (
-          <div className="pill">Loading dashboard…</div>
+        {activeView === 'dashboard' ? (
+          <>
+            {loading && !dashboardPayload ? (
+              <div className="pill">Loading dashboard…</div>
+            ) : null}
+            {error ? (
+              <div className="errorBox">
+                <div className="errorTitle">Couldn’t load dashboard</div>
+                <div className="errorBody">{error}</div>
+              </div>
+            ) : null}
+            {dashboardPayload ? <Dashboard payload={dashboardPayload} /> : null}
+          </>
         ) : null}
-        {error ? (
-          <div className="errorBox">
-            <div className="errorTitle">Couldn’t load dashboard</div>
-            <div className="errorBody">{error}</div>
-          </div>
-        ) : null}
-        {dashboardPayload ? <Dashboard payload={dashboardPayload} /> : null}
-      </main>
 
-      <p className="footerHint">
-        Sleep calendar UI is preserved in{' '}
-        <span className="mono">src/views/SleepCalendarView.jsx</span> — import it in{' '}
-        <span className="mono">App.jsx</span> if you want it back.
-      </p>
+        {activeView === 'calendar' ? (
+          <SleepCalendarView
+            sleeps={sleepRecords}
+            loading={loading && !dashboardPayload}
+            error={error}
+            onRetry={() => void load()}
+            sleepMeta={`Last ${SLEEP_LIMIT} sleeps (from dashboard sync)`}
+          />
+        ) : null}
+
+        {activeView === 'insights' ? (
+          <section className="panel insightsPanel">
+            <div className="panelHeader">
+              <div className="panelTitle">Weekly snapshot</div>
+              <div className="panelMeta">
+                Bounded summary from your latest WHOOP dashboard data (heuristic; optional Bedrock on
+                the API).
+              </div>
+            </div>
+            <div className="panelBody">
+              <button type="button" className="primaryBtn" onClick={() => void loadInsights()} disabled={insightsLoading}>
+                {insightsLoading ? 'Generating…' : 'Generate summary'}
+              </button>
+              {insightsSource ? (
+                <p className="insightsSource">
+                  Source: <span className="mono">{insightsSource}</span>
+                </p>
+              ) : null}
+              {insightsError ? (
+                <div className="errorBox" style={{ marginTop: 12 }}>
+                  <div className="errorTitle">Insights</div>
+                  <div className="errorBody">{insightsError}</div>
+                </div>
+              ) : null}
+              {insightsText ? <p className="insightsBody">{insightsText}</p> : null}
+            </div>
+          </section>
+        ) : null}
+      </main>
     </div>
   )
 }

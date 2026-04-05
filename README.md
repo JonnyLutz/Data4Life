@@ -1,36 +1,61 @@
 # Data4Life
 
-Installable React PWA that connects to WHOOP and shows **sleep** on a dashboard (calendar + details).
+Installable **React + Vite PWA** that signs in with **Amazon Cognito (PKCE)**, connects **WHOOP** via a **serverless API**, and shows **recovery, strain, sleep, workouts**, a **sleep calendar**, and optional **insights** (heuristic summary; **Amazon Bedrock** if you configure a model on the stack).
+
+## Architecture
+
+- **Frontend:** Cognito Hosted UI → authorization code + **PKCE** → `id_token` / `access_token` / `refresh_token` in `localStorage`; silent **refresh** before API calls.
+- **Backend (`infra/`):** API Gateway HTTP API → single Lambda → verifies Cognito **ID token**, stores WHOOP OAuth tokens in **DynamoDB**, reads WHOOP client credentials from **Secrets Manager**, proxies WHOOP Developer API v2.
 
 ## Local dev (frontend)
 
 ```bash
-cd Data4Life
 cp .env.example .env.local
 npm install
 npm run dev
 ```
 
-Set `VITE_API_BASE_URL` in `.env.local` to your deployed API URL (from CDK output).
+Fill `.env.local`:
 
-## Backend (serverless, CDK)
+| Variable | Purpose |
+|----------|---------|
+| `VITE_API_BASE_URL` | Deployed API URL from CDK (`HttpApiUrl` output). In dev, requests go to `/aws-api` and Vite proxies to this host. |
+| `VITE_COGNITO_DOMAIN` | Cognito domain **prefix** only (before `.auth.<region>.amazoncognito.com`). |
+| `VITE_COGNITO_REGION` | Same region as the pool (e.g. `us-east-1`). |
+| `VITE_COGNITO_CLIENT_ID` | App client id from CDK (`UserPoolClientId`). |
+| `VITE_COGNITO_REDIRECT_PATH` | Default `/`. Must match a **callback URL** on the app client (including trailing slash if you use one). |
 
-The backend lives in `infra/` and deploys:
-- API Gateway + Lambda
-- Cognito User Pool (+ domain)
-- DynamoDB table for WHOOP tokens
-- Secrets Manager secret for WHOOP OAuth client credentials
+Dev-only **“Show dev auth”** still lets you paste a Cognito `id_token` for debugging.
 
-### Deploy
+## Backend (CDK)
 
 ```bash
 cd infra
 npm install
-npx cdk bootstrap
+npx cdk bootstrap   # once per account/region
 npx cdk deploy
 ```
 
-Then update the generated Secrets Manager secret (`WhoopOAuthSecret`) to include your real values:
+**If deploy says “Unable to resolve AWS account”:** the AWS CLI has no usable credentials in this shell. Check:
+
+```bash
+aws sts get-caller-identity
+```
+
+If that errors, run `aws configure` (access key) or sign in with SSO (`aws sso login --profile YOUR_PROFILE`) and deploy with `AWS_PROFILE=YOUR_PROFILE npx cdk deploy`.
+
+Note stack context (optional):
+
+- `appUrl` — production PWA origin for Cognito callback/logout and WHOOP post-connect redirect (default `http://localhost:5173/`).
+- `cognitoDomainPrefix` — globally unique Cognito hosted domain prefix if the default conflicts.
+- `bedrockModelId` — e.g. `amazon.titan-text-express-v1` to enable LLM summaries on `POST /insights/summary` (Lambda has `bedrock:InvokeModel`; may still fall back to heuristics if the model/region is unavailable).
+
+After deploy:
+
+1. Copy **HttpApiUrl** → `VITE_API_BASE_URL`.
+2. Copy **UserPoolClientId**, **UserPoolId**, **CognitoHostedUiDomain** (prefix) → Cognito env vars in `.env.local`.
+3. Register **WhoopRedirectUri** (output) as the **Redirect URL** in the [WHOOP Developer Dashboard](https://developer.whoop.com/).
+4. Update Secrets Manager secret **`WhoopOAuthSecret`** JSON:
 
 ```json
 {
@@ -39,12 +64,49 @@ Then update the generated Secrets Manager secret (`WhoopOAuthSecret`) to include
 }
 ```
 
-### WHOOP redirect URL
+Optional: add `"stateSecret"` for WHOOP OAuth state signing; if omitted, the Lambda uses `clientSecret` for HMAC (fine for a personal deployment).
 
-After deployment, register the callback URL in WHOOP:
+## API routes (HTTP API, no `/prod` stage prefix)
 
-- `https://<your-api-host>/prod/auth/callback`
+| Method | Path | Auth |
+|--------|------|------|
+| `GET` | `/dashboard` | Cognito `id_token` |
+| `GET` | `/sleep?limit=1-25` | Cognito `id_token` |
+| `GET` | `/auth/login-url` | Cognito `id_token` — returns WHOOP authorize URL |
+| `GET` | `/auth/callback` | Public — WHOOP OAuth redirect; redirects browser to `APP_URL` |
+| `POST` | `/insights/summary` | Cognito `id_token` — bounded text summary |
 
-## Notes
+## Tests
 
-- The UI currently has a **temporary dev auth** field for a Cognito ID token (JWT) stored in localStorage. Next step is wiring full Cognito Hosted UI login in the PWA so you don’t paste tokens manually.
+```bash
+npm run test        # Vitest (unit)
+npm run test:e2e    # Playwright — starts Vite on 127.0.0.1:5174 (install browsers once: npx playwright install chromium)
+```
+
+## MCP (read-only tools)
+
+Optional [Model Context Protocol](https://modelcontextprotocol.io/) server for Cursor/Claude:
+
+```bash
+cd mcp && npm install
+DATA4LIFE_API_URL="https://YOUR_API" DATA4LIFE_BEARER_TOKEN="YOUR_COGNITO_ID_JWT" node server.mjs
+```
+
+Tools: `get_whoop_dashboard`, `get_whoop_insights`.
+
+## Publishing to GitHub
+
+- **Do not commit** `.env.local` or any file with real `VITE_*` values, WHOOP credentials, or JWTs. This repo ignores `.env*`, `*.local`, and `infra/cdk.context.json` (except `.env.example`).
+- If you **ever** committed secrets by mistake, rotate them (WHOOP secret, Cognito app client, AWS keys) and use [git history cleanup](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository) — ignoring files does not remove past commits.
+
+## Scripts (root)
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Vite dev server |
+| `npm run build` | Production build |
+| `npm run preview` | Preview build |
+| `npm run lint` | ESLint |
+| `npm run typecheck` | `tsc --noEmit` (TypeScript modules under `src/`) |
+| `npm run test` | Vitest |
+| `npm run test:e2e` | Playwright |

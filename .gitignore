@@ -10,7 +10,22 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+cdk.out
+infra/cdk.out
+infra/dist
+# Env files — never commit real URLs, Cognito IDs, or tokens
+.env
+.env.*
+!.env.example
 *.local
+# Keys / stores
+*.pem
+*.p12
+# CDK can cache account/region lookups; keep public repos free of your account hints
+infra/cdk.context.json
+playwright-report
+test-results
+playwright/.cache
 
 # Editor directories and files
 .vscode/*

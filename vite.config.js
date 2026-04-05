@@ -33,6 +33,10 @@ export default defineConfig(({ mode }) => {
       }),
     ],
     server: {
+      // CDK lives alongside the app; avoid full-reload when infra/tsconfig or lambdas change.
+      watch: {
+        ignored: ['**/infra/**', '**/cdk.out/**', '**/mcp/node_modules/**'],
+      },
       proxy: apiTarget
         ? {
             '/aws-api': {
