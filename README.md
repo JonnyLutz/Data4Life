@@ -83,17 +83,6 @@ npm run test        # Vitest (unit)
 npm run test:e2e    # Playwright — starts Vite on 127.0.0.1:5174 (install browsers once: npx playwright install chromium)
 ```
 
-## MCP (read-only tools)
-
-Optional [Model Context Protocol](https://modelcontextprotocol.io/) server for Cursor/Claude:
-
-```bash
-cd mcp && npm install
-DATA4LIFE_API_URL="https://YOUR_API" DATA4LIFE_BEARER_TOKEN="YOUR_COGNITO_ID_JWT" node server.mjs
-```
-
-Tools: `get_whoop_dashboard`, `get_whoop_insights`.
-
 ## Publishing to GitHub
 
 - **Do not commit** `.env.local` or any file with real `VITE_*` values, WHOOP credentials, or JWTs. This repo ignores `.env*`, `*.local`, and `infra/cdk.context.json` (except `.env.example`).
