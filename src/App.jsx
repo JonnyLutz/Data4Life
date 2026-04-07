@@ -15,8 +15,10 @@ import { decodeJwtPayload, isTokenValid } from './lib/jwt'
 import Dashboard from './components/Dashboard.jsx'
 import LoginPanel from './components/LoginPanel.jsx'
 import SleepCalendarView from './views/SleepCalendarView.jsx'
+import { buildMockDashboardPayload, mockInsightsSummary } from './demo/mockDashboard'
 
 const SLEEP_LIMIT = 25
+const DEMO_MODE_KEY = 'data4life_demo_mode'
 
 function App() {
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -40,6 +42,7 @@ function App() {
   const [insightsLoading, setInsightsLoading] = useState(false)
   const [insightsError, setInsightsError] = useState('')
   const [insightsSource, setInsightsSource] = useState('')
+  const [demoMode, setDemoMode] = useState(() => window.localStorage.getItem(DEMO_MODE_KEY) === '1')
 
   const tokenPayload = useMemo(() => decodeJwtPayload(idTokenDraft.trim()), [idTokenDraft])
   const tokenUse = tokenPayload?.token_use ?? tokenPayload?.tokenUse ?? ''
@@ -54,12 +57,13 @@ function App() {
         ? tokenPayload.aud
         : ''
 
-  const displayName =
-    (typeof tokenPayload?.email === 'string' && tokenPayload.email) ||
-    (typeof tokenPayload?.['cognito:username'] === 'string' && tokenPayload['cognito:username']) ||
-    ''
+  const displayName = demoMode
+    ? 'Guest'
+    : (typeof tokenPayload?.email === 'string' && tokenPayload.email) ||
+      (typeof tokenPayload?.['cognito:username'] === 'string' && tokenPayload['cognito:username']) ||
+      ''
 
-  const loggedIn = sessionChecked && isTokenValid(idTokenDraft)
+  const loggedIn = sessionChecked && (demoMode || isTokenValid(idTokenDraft))
   const sessionExpired =
     sessionChecked &&
     idTokenDraft.trim().length > 0 &&
@@ -83,6 +87,16 @@ function App() {
   }
 
   async function load() {
+    if (demoMode) {
+      setError('')
+      setLoading(true)
+      try {
+        setDashboardPayload(buildMockDashboardPayload())
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
     if (!isTokenValid(idTokenDraft)) {
       setLoading(false)
       return
@@ -102,6 +116,7 @@ function App() {
   }
 
   async function connectWhoop() {
+    if (demoMode) return
     setError('')
     try {
       const data = await fetchWhoopLoginUrl()
@@ -122,7 +137,24 @@ function App() {
     })()
   }
 
+  function enterDemoMode() {
+    window.localStorage.setItem(DEMO_MODE_KEY, '1')
+    setDemoMode(true)
+    clearTokens()
+    setIdTokenDraft('')
+    setAuthCallbackError('')
+    setError('')
+    setInsightsText('')
+    setInsightsError('')
+    setInsightsSource('')
+    setActiveView('dashboard')
+    setDashboardPayload(buildMockDashboardPayload())
+    setLoading(false)
+  }
+
   function logout() {
+    window.localStorage.removeItem(DEMO_MODE_KEY)
+    setDemoMode(false)
     clearTokens()
     setIdTokenDraft('')
     setDashboardPayload(null)
@@ -134,6 +166,18 @@ function App() {
   }
 
   async function loadInsights() {
+    if (demoMode) {
+      setInsightsError('')
+      setInsightsLoading(true)
+      try {
+        const r = mockInsightsSummary()
+        setInsightsText(r.summary)
+        setInsightsSource(r.source)
+      } finally {
+        setInsightsLoading(false)
+      }
+      return
+    }
     setInsightsError('')
     setInsightsLoading(true)
     try {
@@ -160,6 +204,16 @@ function App() {
     let alive = true
     void (async () => {
       try {
+        const demo = window.localStorage.getItem(DEMO_MODE_KEY) === '1'
+        if (demo && alive) {
+          setDemoMode(true)
+          setAuthCallbackError('')
+          setError('')
+          setLoading(false)
+          setDashboardPayload(buildMockDashboardPayload())
+          return
+        }
+
         const rr = await consumeCognitoPkceRedirect()
         if (!alive) return
         if (rr && !rr.ok) {
@@ -214,6 +268,7 @@ function App() {
       <div className="appShell">
         <LoginPanel
           onSignIn={signIn}
+          onDemoMode={enterDemoMode}
           callbackError={authCallbackError}
           sessionExpired={sessionExpired}
           missingCognitoEnv={!cognitoReady}
@@ -239,13 +294,15 @@ function App() {
             </button>
           ) : null}
           <button type="button" className="ghostBtn" onClick={logout}>
-            Log out
+            {demoMode ? 'Exit demo' : 'Log out'}
           </button>
-          <button type="button" onClick={connectWhoop} disabled={loading}>
-            Connect WHOOP
-          </button>
+          {!demoMode ? (
+            <button type="button" onClick={connectWhoop} disabled={loading}>
+              Connect WHOOP
+            </button>
+          ) : null}
           <button type="button" className="primaryBtn" onClick={() => void load()} disabled={loading}>
-            {loading ? 'Syncing…' : 'Sync'}
+            {loading ? 'Syncing…' : demoMode ? 'Refresh demo' : 'Sync'}
           </button>
         </div>
       </header>
@@ -284,7 +341,7 @@ function App() {
             API: <span className="mono">{apiDisplay || '—'}</span>
           </div>
           <div className="devAuthCognito">
-            <div className="devAuthCognitoLabel">Hosted UI (PKCE — same as Sign in)</div>
+            <div className="devAuthCognitoLabel">Hosted UI (same as Sign in)</div>
             <div className="devAuthCognitoRow">
               <button type="button" className="ghostBtn" onClick={() => void copyCognitoLoginUrl()}>
                 {cognitoLinkCopied ? 'Copied URL' : 'Copy login URL'}

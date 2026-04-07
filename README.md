@@ -1,10 +1,11 @@
+
 # Data4Life
 
-Installable **React + Vite PWA** that signs in with **Amazon Cognito (PKCE)**, connects **WHOOP** via a **serverless API**, and shows **recovery, strain, sleep, workouts**, a **sleep calendar**, and optional **insights** (heuristic summary; **Amazon Bedrock** if you configure a model on the stack).
+Installable **React + Vite PWA** that signs in with **Amazon Cognito**, connects **WHOOP** via a **serverless API**, and shows **recovery, strain, sleep, workouts**, a **sleep calendar**, and optional **insights** (heuristic summary; **Amazon Bedrock** if you configure a model on the stack).
 
 ## Architecture
 
-- **Frontend:** Cognito Hosted UI → authorization code + **PKCE** → `id_token` / `access_token` / `refresh_token` in `localStorage`; silent **refresh** before API calls.
+- **Frontend:** Cognito Hosted UI → authorization code flow → `id_token` / `access_token` / `refresh_token` in `localStorage`; silent **refresh** before API calls.
 - **Backend (`infra/`):** API Gateway HTTP API → single Lambda → verifies Cognito **ID token**, stores WHOOP OAuth tokens in **DynamoDB**, reads WHOOP client credentials from **Secrets Manager**, proxies WHOOP Developer API v2.
 
 ## Local dev (frontend)
@@ -27,6 +28,22 @@ Fill `.env.local`:
 
 Dev-only **“Show dev auth”** still lets you paste a Cognito `id_token` for debugging.
 
+### AWS Amplify (`redirect_mismatch` after deploy)
+
+The SPA sends **`redirect_uri` = your Amplify site origin + `/`** (see `src/auth/cognitoPkce.ts`). Cognito only allows sign-in if that URL is on the app client’s **Allowed callback URLs**.
+
+1. Note your app URL, e.g. `https://main.dxxxxxxxxxxxx.amplifyapp.com`.
+2. Redeploy the stack with **`appUrl`** set to that origin (trailing slash is fine):
+
+```bash
+cd infra
+npx cdk deploy -c appUrl=https://main.dxxxxxxxxxxxx.amplifyapp.com/
+```
+
+3. In **Amplify Console → Environment variables**, set the same `VITE_*` values you use locally (`VITE_API_BASE_URL`, Cognito vars). Rebuild the frontend.
+
+For **preview branches**, add URLs via `-c extraCallbackUrls=https://branch.dxxx.amplifyapp.com/,...` (or run `cdk deploy` again with those included).
+
 ## Backend (CDK)
 
 ```bash
@@ -46,7 +63,8 @@ If that errors, run `aws configure` (access key) or sign in with SSO (`aws sso l
 
 Note stack context (optional):
 
-- `appUrl` — production PWA origin for Cognito callback/logout and WHOOP post-connect redirect (default `http://localhost:5173/`).
+- `appUrl` — hosted app origin for Cognito **callback/logout** URLs and Lambda **`APP_URL`** (WHOOP redirects here after connect). Use your **Amplify URL** for production, e.g. `https://main.dxxxxxxxxxxxx.amplifyapp.com/` (include trailing slash if your app uses `redirect_uri` with one). Default `http://localhost:5173/`.
+- `extraCallbackUrls` — comma-separated extra origins (e.g. **Amplify branch previews**): `https://pr-3.dxxx.amplifyapp.com/,https://www.example.com/`
 - `cognitoDomainPrefix` — globally unique Cognito hosted domain prefix if the default conflicts.
 - `bedrockModelId` — e.g. `amazon.titan-text-express-v1` to enable LLM summaries on `POST /insights/summary` (Lambda has `bedrock:InvokeModel`; may still fall back to heuristics if the model/region is unavailable).
 

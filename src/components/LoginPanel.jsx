@@ -1,4 +1,10 @@
-export default function LoginPanel({ onSignIn, callbackError, sessionExpired, missingCognitoEnv }) {
+export default function LoginPanel({
+  onSignIn,
+  onDemoMode,
+  callbackError,
+  sessionExpired,
+  missingCognitoEnv,
+}) {
   return (
     <div className="loginGate">
       <div className="loginCard">
@@ -19,7 +25,7 @@ export default function LoginPanel({ onSignIn, callbackError, sessionExpired, mi
         <p className="loginCopy">
           {sessionExpired
             ? 'Your session expired. Sign in again to load the dashboard.'
-            : 'Sign in with Cognito (PKCE) to call the API and connect WHOOP.'}
+            : 'Sign in with Cognito to call the API and connect WHOOP.'}
         </p>
         {callbackError ? (
           <div className="errorBox loginCallbackErr">
@@ -34,6 +40,14 @@ export default function LoginPanel({ onSignIn, callbackError, sessionExpired, mi
           disabled={missingCognitoEnv}
         >
           Sign in
+        </button>
+        <button
+          type="button"
+          className="ghostBtn"
+          style={{ width: '100%', marginTop: 10 }}
+          onClick={onDemoMode}
+        >
+          Demo mode (continue as guest)
         </button>
       </div>
     </div>
